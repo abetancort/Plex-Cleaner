@@ -8,6 +8,8 @@
 # Version 1.8 - Added Profies
 # Version 1.9 - Added options for checking watch status for multiple users in Plex Home
 # Version 1.91 - Added ability to select section by title, preparation for new config
+# Version 1.92 - Add ignored folders
+# Version 1.93 - Add ability to chose log file mode.
 ## Config File ###########################################################
 # All settings in the config file will overwrite the settings here
 Config = ""  # Location of a config file to load options from, can be specified in the commandline with --config [CONFIG_FILE]
@@ -18,6 +20,7 @@ Port = ""  # Port of the Plex Media Server, by default 32400 will be used
 SectionList = []  # Sections to clean. If empty all sections will be looked at, the section id should be used here which is the number found be in the url on PlexWeb after /section/[ID]
 IgnoreSections = []  # Sections to skip cleaning, for use when Settings['SectionList'] is not specified, the same as SectionList, the section id should be used here
 LogFile = ""  # Location of log file to save console output
+LogFileMode = "overwrite"  # File Mode for logging, overwrite or append, default is overwrite
 trigger_rescan = False  # trigger_rescan will rescan a section if changes are made to it
 
 # Use Username/Password or Token for servers with PlexHome
@@ -92,6 +95,8 @@ default_location = ''  # /path/to/file
 default_homeUsers = ''  # 'Bob,Joe,Will'
 # if set to anything > 0, videos with watch progress greater than this will be considered watched
 default_progressAsWatched = 0  # Progress percentage to consider video as watched
+# list of folders to ignore for processing
+default_ignoreFolders = []  # Files that are under any of these folders on the Plex Server will not be processed
 ##########################################################################
 
 ## CUSTOMIZED SHOW SETTINGS ##############################################
@@ -147,10 +152,11 @@ try:
 except:
     import ConfigParser
 
-CONFIG_VERSION = 1.91
+CONFIG_VERSION = 1.93
 client_id = uuid.uuid1()
 home_user_tokens = {}
 machine_client_identifier = ''
+debug_mode = False
 try:
     import urllib.request as urllib2
 except:
@@ -220,7 +226,8 @@ def getAccessToken(token):
     devices = resources.getElementsByTagName("Device")
     for device in devices:
         if len(devices) == 1 or machine_client_identifier == device.getAttribute("clientIdentifier") or \
-                (Settings['DeviceName'] and (Settings['DeviceName'].lower() in device.getAttribute('name').lower() or Settings[
+                (Settings['DeviceName'] and (
+                        Settings['DeviceName'].lower() in device.getAttribute('name').lower() or Settings[
                     'DeviceName'].lower() in device.getAttribute('clientIdentifier').lower())):
             access_token = device.getAttribute('accessToken')
             if not access_token:
@@ -243,12 +250,14 @@ def getAccessToken(token):
 
 def getPlexHomeUserTokens():
     homeUsers = getURLX("https://plex.tv/api/home/users")
+    user_tokens = {}
     if homeUsers:
         # print(homeUsers.toprettyxml())
         user_tokens = {}
         for user in homeUsers.getElementsByTagName("User"):
             user_id = user.getAttribute("id")
-            switch_page = getURLX("https://plex.tv/api/home/users/" + user_id + "/switch", data=b'')  # Empty byte data to send a 'POST'
+            switch_page = getURLX("https://plex.tv/api/home/users/" + user_id + "/switch",
+                                  data=b'')  # Empty byte data to send a 'POST'
             if switch_page:
                 user_element = switch_page.getElementsByTagName('user')[0]
                 username = user_element.getAttribute("title").lower()
@@ -269,6 +278,7 @@ def LoadSettings(opts):
     s['SectionList'] = opts.get('SectionList', SectionList)
     s['IgnoreSections'] = opts.get('IgnoreSections', IgnoreSections)
     s['LogFile'] = opts.get('LogFile', LogFile)
+    s['LogFileMode'] = opts.get('LogFileMode', LogFileMode)
     s['trigger_rescan'] = opts.get('trigger_rescan', trigger_rescan)
     s['Token'] = opts.get('Token', Token)
     s['Username'] = opts.get('Username', Username)
@@ -290,6 +300,7 @@ def LoadSettings(opts):
     s['default_location'] = opts.get('default_location', default_location)
     s['default_onDeck'] = opts.get('default_onDeck', default_onDeck)
     s['default_homeUsers'] = opts.get('default_homeUsers', default_homeUsers)
+    s['default_ignoreFolders'] = opts.get('default_ignoreFolders', default_ignoreFolders)
     s['ShowPreferences'] = OrderedDict(sorted(opts.get('ShowPreferences', ShowPreferences).items()))
     s['MoviePreferences'] = OrderedDict(sorted(opts.get('MoviePreferences', MoviePreferences).items()))
     s['Profiles'] = OrderedDict(sorted(opts.get('Profiles', Profiles).items()))
@@ -357,6 +368,11 @@ def performAction(file, action, media_id=0, location=""):
     action = action.lower()
     if action.startswith('k'):  # Keep file
         return False
+    for path in Settings['default_ignoreFolders']:
+        if file.startswith(path):
+            log("File is in " + path)
+            log("[IGNORED] " + file)
+            return False
     if test or action.startswith('f'):  # Test file or Flag file
         if not os.path.isfile(file):
             log("[NOT FOUND] " + file)
@@ -503,7 +519,8 @@ def getMediaInfo(VideoNode):
             else:
                 file = urllib2.unquote(file)
             return {'view': view, 'DaysSinceVideoAdded': DaysSinceVideoAdded,
-                    'DaysSinceVideoLastViewed': DaysSinceVideoLastViewed, 'file': file, 'media_id': media_id, 'progress': progress}
+                    'DaysSinceVideoLastViewed': DaysSinceVideoLastViewed, 'file': file, 'media_id': media_id,
+                    'progress': progress}
 
 
 def checkUsersWatched(users, media_id, progressAsWatched):
@@ -515,13 +532,15 @@ def checkUsersWatched(users, media_id, progressAsWatched):
         users = home_user_tokens.keys()
     for u in users:
         if u in home_user_tokens:
-            user_media_page = getURLX(Settings['Host'] + ":" + Settings['Port'] + '/library/metadata/' + media_id, token=home_user_tokens[u])
+            user_media_page = getURLX(Settings['Host'] + ":" + Settings['Port'] + '/library/metadata/' + media_id,
+                                      token=home_user_tokens[u])
             if user_media_page:
                 video = user_media_page.getElementsByTagName("Video")[0]
                 videoProgress = 0
                 if video.hasAttribute('viewOffset') and video.hasAttribute('duration'):
-                    videoProgress = int(video.getAttribute('viewOffset'))*100/int(video.getAttribute('duration'))
-                if (video.hasAttribute('viewCount') and int(video.getAttribute('viewCount')) > 0) or (progressAsWatched > 0 and videoProgress > progressAsWatched):
+                    videoProgress = int(video.getAttribute('viewOffset')) * 100 / int(video.getAttribute('duration'))
+                if (video.hasAttribute('viewCount') and int(video.getAttribute('viewCount')) > 0) or (
+                                progressAsWatched > 0 and videoProgress > progressAsWatched):
                     lastViewedAt = video.getAttribute('lastViewedAt')
                     if not lastViewedAt or lastViewedAt == '' or lastViewedAt == '0':
                         DaysSinceVideoLastViewed = 0
@@ -550,18 +569,24 @@ def checkMovies(doc, section):
     global KeptCount
 
     changes = 0
-    movie_settings = default_settings.copy()
-    movie_settings.update(Settings['MoviePreferences'])
-    check_users = []
-    if movie_settings['homeUsers']:
-        check_users = movie_settings['homeUsers'].strip(" ,").lower().split(",")
-        for i in range(0, len(check_users)):  # Remove extra spaces and commas
-            check_users[i] = check_users[i].strip(", ")
     for VideoNode in doc.getElementsByTagName("Video"):
+        movie_settings = default_settings.copy()
+        movie_settings.update(Settings['MoviePreferences'])
         title = VideoNode.getAttribute("title")
         movie_id = VideoNode.getAttribute("ratingKey")
         m = getMediaInfo(VideoNode)
         onDeck = CheckOnDeck(movie_id)
+        collections = VideoNode.getElementsByTagName("Collection")
+        for collection in collections:
+            collection_tag = collection.getAttribute('tag')
+            if collection_tag and collection_tag in Settings['Profiles']:
+                movie_settings.update(Settings['Profiles'][collection_tag])
+                print("Using profile: " + collection_tag)
+        check_users = []
+        if movie_settings['homeUsers']:
+            check_users = movie_settings['homeUsers'].strip(" ,").lower().split(",")
+            for i in range(0, len(check_users)):  # Remove extra spaces and commas
+                check_users[i] = check_users[i].strip(", ")
         if movie_settings['watched']:
             if check_users:
                 movie_settings['onDeck'] = False
@@ -612,6 +637,12 @@ def cleanUpFolders(section, max_size):
     for directory in doc_sections.getElementsByTagName("Directory"):
         if directory.getAttribute("key") == section:
             for location in directory.getElementsByTagName("Location"):
+                ignore_folder = False
+                for f in Settings['default_ignoreFolders']:
+                    if location.getAttribute("path").startswith(f):
+                        ignore_folder = True
+                if ignore_folder:
+                    continue
                 path = getLocalPath(location.getAttribute("path"))
                 if os.path.isdir(path):
                     for folder in os.listdir(path):
@@ -628,7 +659,14 @@ def cleanUpFolders(section, max_size):
                                                                '.nodelete')):  # Do not delete folders that have .nodelete in them
                                     continue
                                 size = getTotalSize(subfolder_path)
+                                ignore_folder = False
+                                for f in Settings['default_ignoreFolders']:
+                                    if subfolder_path.startswith(f):
+                                        ignore_folder = True
+                                if ignore_folder:
+                                    continue
                                 if os.path.isdir(subfolder_path) and size < max_size * 1024 * 1024:
+
                                     try:
                                         if test:  # or default_action.startswith("f"):
                                             log("**[Flagged]: " + subfolder_path)
@@ -647,7 +685,8 @@ def checkShow(showDirectory):
     global FileCount
     # Parse all of the episode information from the season pages
     show_settings = default_settings.copy()
-    show_metadata = getURLX(Settings['Host'] + ":" + Settings['Port'] + '/library/metadata/' + showDirectory.getAttribute('ratingKey'))
+    show_metadata = getURLX(
+        Settings['Host'] + ":" + Settings['Port'] + '/library/metadata/' + showDirectory.getAttribute('ratingKey'))
     collections = show_metadata.getElementsByTagName("Collection")
     for collection in collections:
         collection_tag = collection.getAttribute('tag')
@@ -719,7 +758,8 @@ def checkShow(showDirectory):
                 compareDay = m['DaysSinceVideoAdded']
             # key = '%sx%s' % (season_num, episode_num)  # store episode with key based on season number and episode number for sorting
             episodes.append({'season': season_num, 'episode': episode_num, 'title': title, 'view': m['view'],
-                             'compareDay': compareDay, 'file': m['file'], 'media_id': m['media_id'], 'progress': m['progress']})
+                             'compareDay': compareDay, 'file': m['file'], 'media_id': m['media_id'],
+                             'progress': m['progress']})
             FileCount += 1
     count = 0
     changes = 0
@@ -734,7 +774,9 @@ def checkShow(showDirectory):
             log("%s - S%sxE%s - %s | Viewed: %d | Days Since Added: %d | On Deck: %s" % (
                 show_name, ep['season'], ep['episode'], ep['title'], ep['view'], ep['compareDay'], onDeck))
             checkWatched = True
-        if not (not ((len(episodes) - k) > show_settings['episodes']) and not (ep['compareDay'] > show_settings['maxDays'] > 0)):  # if we have more episodes, then check if we can delete the file
+        if not (not ((len(episodes) - k) > show_settings['episodes']) and not (
+                        ep['compareDay'] > show_settings[
+                        'maxDays'] > 0)):  # if we have more episodes, then check if we can delete the file
             checkDeck = False
             if show_settings['onDeck']:
                 checkDeck = onDeck or (k + 1 < len(episodes) and CheckOnDeck(episodes[k + 1]['media_id']))
@@ -759,19 +801,27 @@ def checkShow(showDirectory):
 
 ## Main Script ############################################
 
+# reload sys to set default encoding to utf-8
+reload(sys)
+sys.setdefaultencoding("utf-8")
+
 # parse arguments
 parser = argparse.ArgumentParser()
 parser.add_argument("--test", "-test", help="Run the script in test mode", action="store_true", default=False)
-parser.add_argument("--dump", "-dump", help="Dump the settings to a configuration file and exit", nargs='?', const="Cleaner.conf", default=None)
-parser.add_argument("--config", "-config", "--load", "-load", help="Load settings from a configuration file and run with settings")
-parser.add_argument("--update_config", "-update_config", action="store_true", help="Update the config file with new settings from the script and exit")
-parser.add_argument("--debug", "-debug", action="store_true", help="Run script in debug mode to log more error information")
-parser.add_argument("--config_edit", "-config_edit", action="store_true", help="Prompts for editing the config from the commandline")
+parser.add_argument("--dump", "-dump", help="Dump the settings to a configuration file and exit", nargs='?',
+                    const="Cleaner.conf", default=None)
+parser.add_argument("--config", "-config", "--load", "-load",
+                    help="Load settings from a configuration file and run with settings")
+parser.add_argument("--update_config", "-update_config", action="store_true",
+                    help="Update the config file with new settings from the script and exit")
+parser.add_argument("--debug", "-debug", action="store_true",
+                    help="Run script in debug mode to log more error information")
+parser.add_argument("--config_edit", "-config_edit", action="store_true",
+                    help="Prompts for editing the config from the commandline")
 
 args = parser.parse_args()
 
 test = args.test
-
 debug_mode = args.debug
 
 if args.config:
@@ -812,6 +862,9 @@ if args.dump:
     print("Settings saved. Exiting...")
     exit()
 
+if test:
+    print(json.dumps(Settings, indent=2, sort_keys=False))  # if testing print out the loaded settings in the console
+
 if args.update_config:
     if Config:
         # resp = get_input("Edit Settings in console? (y/n)")
@@ -830,13 +883,20 @@ if Settings['Port'] == "":
     Settings['Port'] = "32400"
 
 if test:
-    print(json.dumps(Settings,indent=2))
+    print(json.dumps(Settings, indent=2))
+    print("")
 
 LogToFile = False
 if not Settings['LogFile'] == "":
     LogToFile = True
-    logging.basicConfig(filename=Settings['LogFile'], filemode='w', level=logging.DEBUG)
+    filemode = "w"
+    if Settings.get("LogFileMode").startswith("a"):
+        filemode = "a"
+    logging.basicConfig(filename=Settings['LogFile'], filemode=filemode, level=logging.DEBUG)
     logging.captureWarnings(True)
+
+log("** Script started " + time.strftime("%m-%d-%Y %I:%M:%S%p"))
+log("")
 
 if Settings['Token'] == "":
     if Settings['Username']:
@@ -896,7 +956,8 @@ doc_sections = getURLX(Settings['Host'] + ":" + Settings['Port'] + "/library/sec
 
 if (not Settings['SectionList']) and doc_sections:
     for Section in doc_sections.getElementsByTagName("Directory"):
-        if Section.getAttribute("key") not in Settings['IgnoreSections'] and Section.getAttribute("title") not in Settings['IgnoreSections']:
+        if Section.getAttribute("key") not in Settings['IgnoreSections'] and Section.getAttribute("title") not in \
+                Settings['IgnoreSections']:
             Settings['SectionList'].append(Section.getAttribute("key"))
 elif doc_sections and Settings['SectionList']:  # Replace section names with the proper id(/key)
     for i in range(0, len(Settings['SectionList'])):
