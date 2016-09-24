@@ -21,6 +21,7 @@ SectionList = []  # Sections to clean. If empty all sections will be looked at, 
 IgnoreSections = []  # Sections to skip cleaning, for use when Settings['SectionList'] is not specified, the same as SectionList, the section id should be used here
 LogFile = ""  # Location of log file to save console output
 LogFileMode = "overwrite" #File Mode for logging, overwrite or append, default is overwrite
+LogLevel = "normal" # Verbosity of the logging "short" | "normal" | "verbose", the default is "normal"
 trigger_rescan = False  # trigger_rescan will rescan a section if changes are made to it
 
 # Use Username/Password or Token for servers with PlexHome
